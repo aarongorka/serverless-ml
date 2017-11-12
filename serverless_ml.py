@@ -175,8 +175,9 @@ def get_correlation_id(body=None, payload=None, event=None):
     return correlation_id
 
 def predict(event, context):
-    logging.info(json.dumps({'event': event}))
     correlation_id = get_correlation_id(event=event)
+    aws_lambda_logging.setup(level=os.environ.get('LOGLEVEL', 'INFO'), env=os.environ.get('ENV'), correlation_id=correlation_id)
+    logging.info(json.dumps({'event': event}))
 
 #    bucket = event['Records'][0]['s3']['bucket']['name']
 #    key = unquote_plus(event['Records'][0]['s3']['object']['key'])
@@ -185,9 +186,10 @@ def predict(event, context):
     key = "E2W5TI4SU4AMRI.2017-07-12-22.46a16946.csv"
 
     data_s3url = "s3://{}/{}".format(bucket, key)
+    output_s3 = "s3://{}/{}".format(os.environ['RESULTS_BUCKET'], key.replace(".csv", "-results.csv"))
     schema_fn = "schema.json"
     
-    ml = boto3.client('machinelearning')
+    ml = boto3.client('machinelearning', region_name='us-east-1')
 
     ds_id = 'ds-' + correlation_id
     ml.create_data_source_from_s3(
@@ -201,14 +203,28 @@ def predict(event, context):
     )  
 
     bp_id = 'bp-' + correlation_id
-    ds_id = create_data_source_for_scoring(ml, data_s3url, schema_fn)
+    ds_id = create_data_source_for_scoring(ml, data_s3url, schema_fn, correlation_id)
     ml.create_batch_prediction(
         BatchPredictionId=bp_id,
         BatchPredictionName="Batch Prediction for marketing sample",
-        MLModelId=model_id,
+        MLModelId=os.environ['MODEL_ID'],
         BatchPredictionDataSourceId=ds_id,
         OutputUri=output_s3
     )
+
+def create_data_source_for_scoring(ml, data_s3url, schema_fn, correlation_id):
+    ds_id = 'ds-' + correlation_id
+    ml.create_data_source_from_s3(
+        DataSourceId=ds_id,
+        DataSourceName="DS for Batch Prediction %s" % data_s3url,
+        DataSpec={
+            "DataLocationS3": data_s3url,
+            "DataSchema": open(schema_fn).read(),
+        },
+        ComputeStatistics=False
+    )
+    print("Created Datasource %s for batch prediction" % ds_id)
+    return ds_id
 
 def build_model(event, context):
     """Creates all the objects needed to build an ML Model & evaluate its quality.
