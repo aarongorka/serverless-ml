@@ -41,8 +41,6 @@ def transform(event, context):
 
     bucket = event['Records'][0]['s3']['bucket']['name']
     key = unquote_plus(event['Records'][0]['s3']['object']['key'])
-#    bucket = 'aarongorka-serverless-ml'
-#    key = 'E2W5TI4SU4AMRI.2017-07-12-22.46a16946.gz'
 
     s3 = boto3.client('s3')
     s3_resource = boto3.resource('s3')
@@ -51,11 +49,6 @@ def transform(event, context):
     data = zlib.decompress(data, 16+zlib.MAX_WBITS).decode('UTF-8')
 
     reader = geoip2.database.Reader('./GeoLite2-City.mmdb')
-#    data = """#Version: 1.0
-##Fields: date time x-edge-location sc-bytes c-ip cs-method cs(Host) cs-uri-stem sc-status cs(Referer) cs(User-Agent) cs-uri-query cs(Cookie) x-edge-result-type x-edge-request-id x-host-header cs-protocol cs-bytes time-taken x-forwarded-for ssl-protocol ssl-cipher x-edge-response-result-type cs-protocol-version
-#2017-07-12	22:25:50	IND6	556	2607:f2f8:a8e0::2	GET	d25881aryus3ny.cloudfront.net	/	301	-	Python-urllib/1.17	-	-	Redirect	tZXUNOuLdA-Yel6XE5T6F7nkTohRc1JFMB3JJjRUxt0VSqof06UR_w==	blog.aarongorka.com	http	90	0.001	-	-	-	Redirect	HTTP/1.0
-#2017-07-12	22:25:53	NRT51	566	123.125.71.109	GET	d25881aryus3ny.cloudfront.net	/robots.txt	301	-	Mozilla/5.0%2520(compatible;%2520Baiduspider/2.0;%2520+http://www.baidu.com/search/spider.html)	-	-	Redirect	zB2s7XD7M6EHz27GOi3-jL7QQZEEFEs9BcJqBlchdkhCOLQ-zy9CZg==	blog.aarongorka.com	http	237	0.000	-	-	-	Redirect	HTTP/1.1
-#2017-07-12	22:25:54	NRT51	499	123.125.71.52	GET	d25881aryus3ny.cloudfront.net	/robots.txt	200	-	Mozilla/5.0%2520(compatible;%2520Baiduspider/2.0;%2520+http://www.baidu.com/search/spider.html)	-	-	Miss	1fg7fZ1V_tdyYxtAuupGb8JBbR-81QIo6vimOXgNAhM8ieDwCJe7ZA==	blog.aarongorka.com	https	195	1.187	-	TLSv1.2	ECDHE-RSA-AES128-GCM-SHA256	Miss	HTTP/1.1"""
     parsed = cloudfront_log_parser.parse(data)    
     output = io.StringIO()
     fieldnames = ['ip_address', 'day_of_week', 'hour_of_day', 'minute_of_hour', 'edge', 'response_size', 'http_method', 'cloudfront_host', 'path', 'status_code', 'status_code_group', 'aborted', 'referrer', 'user_agent', 'browser_family', 'browser_version', 'os_family', 'os_version', 'device', 'is_mobile', 'is_tablet', 'is_pc', 'is_touch_capable', 'is_bot', 'querystring', 'edge_result_type', 'request_host', 'request_protocol', 'request_size', 'response_duration', 'ssl_protocol', 'ssl_cypher', 'edge_response_result_type', 'country', 'city', 'latitude', 'longitude' ]
@@ -73,12 +66,23 @@ def transform(event, context):
     for row in return_object:
         logging.debug(json.dumps({'message': 'row in return_object', 'row': row}))
         writer.writerow(row)
-    s3_resource.Object('aarongorka-serverless-ml-transformed', key.replace(".gz", ".csv")).put(Body=output.getvalue())
+    s3_resource.Object(os.environ['TRANSFORMED_BUCKET'], key.replace(".gz", ".csv")).put(Body=output.getvalue())
     
     logging.info(json.dumps({'message': 'Done!'}))
 
 def format_data(i, reader):
-    geoip = reader.city(i.ip_address)
+    country = ""
+    city = ""
+    latitude = ""
+    longitude = ""
+    try:
+        geoip = reader.city(i.ip_address)
+        country = geoip.country.name
+        city = geoip.city.name
+        latitude = geoip.location.latitude
+        longitude = geoip.location.longitude
+    except:
+        pass
 
     user_agent = i.user_agent
 
@@ -133,10 +137,10 @@ def format_data(i, reader):
         'ssl_protocol': i.ssl_protocol,
         'ssl_cypher': i.ssl_cypher,
         'edge_response_result_type': i.edge_response_result_type,
-        'country': geoip.country.name,
-        'city': geoip.city.name,
-        'latitude': geoip.location.latitude,
-        'longitude': geoip.location.longitude
+        'country': country,
+        'city': city,
+        'latitude': latitude,
+        'longitude': longitude
     }
     for key, value in fields.items():
         if not value:
@@ -177,7 +181,7 @@ def predict(event, context):
 #    bucket = event['Records'][0]['s3']['bucket']['name']
 #    key = unquote_plus(event['Records'][0]['s3']['object']['key'])
 
-    bucket = "aarongorka-serverless-ml-transformed"
+    bucket = os.environ['TRANSFORMED_BUCKET']
     key = "E2W5TI4SU4AMRI.2017-07-12-22.46a16946.csv"
 
     data_s3url = "s3://{}/{}".format(bucket, key)
@@ -212,7 +216,7 @@ def build_model(event, context):
     logging.info(json.dumps({'event': event}))
     correlation_id = get_correlation_id(event=event)
 
-    data_s3_url = "s3://{}/{}".format('aarongorka-serverless-ml-transformed', 'training-data.csv')
+    data_s3_url = "s3://{}/{}".format(os.environ['TRANSFORMED_BUCKET'], 'training-data.csv')
     schema_fn = "schema.json"
     recipe_fn = "recipe.json"
     name = "serverless-ml"
@@ -325,9 +329,15 @@ def create_training_data(event, context):
     pool.close()
     pool.join()
     reader.close()
-    whitelisted_ips = ['220.233.100.193', '54.79.75.105', '103.197.239.98', '54.252.209.191']
+
+#    with ThreadPoolExecutor(max_workers=12) as executor:
+#        for arg in zip(parsed, itertools.repeat(reader)):
+#            future = executor.submit(format_data, arg)
+#    return_object = future.result()
+
+    whitelisted_ips = ['']
     bad_ips = ['111.88.139.9', '111.88.139.9']
-    bad_agents = ['curl', 'wget', 'Python', 'python', 'ruby', '-', 'Java'] 
+    bad_agents = ['curl', 'wget', 'Python', 'python', 'ruby', '-', 'Java', 'PhantomJS'] 
     logging.debug(json.dumps({'message': 'multithreaded return object', 'object': '{}'.format(return_object)}))
     for row in return_object:
         is_malicious_bot = True
@@ -348,9 +358,9 @@ def create_training_data(event, context):
         row['ip_address'] = ''
         row['request_host'] = ''
         writer.writerow(row)
-    s3_resource.Object('aarongorka-serverless-ml-transformed', "training-data.csv").put(Body=output.getvalue())
+    s3_resource.Object(os.environ['TRANSFORMED_BUCKET'], "training-data.csv").put(Body=output.getvalue())
     logging.info(json.dumps({'message': 'Done!'}))
 
 if __name__ == '__main__':
-#    build_model({},{})
-    create_training_data({},{})
+    build_model({},{})
+#    create_training_data({},{})
